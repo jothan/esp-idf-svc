@@ -892,6 +892,44 @@ mod esptls {
         //     self.0.borrow_mut().negotiate_server(cfg)
         // }
 
+        pub fn poll_read(
+            &self,
+            ctx: &mut std::task::Context<'_>,
+            buf: &mut [u8],
+        ) -> core::task::Poll<Result<usize, EspError>> {
+            loop {
+                let res = self.0.borrow_mut().read(buf);
+
+                match res {
+                    Err(e) => match self.poll_wait(ctx, e) {
+                        core::task::Poll::Pending => break core::task::Poll::Pending,
+                        core::task::Poll::Ready(Err(e)) => break core::task::Poll::Ready(Err(e)),
+                        _ => (), // continue
+                    },
+                    other => break core::task::Poll::Ready(other),
+                }
+            }
+        }
+
+        pub fn poll_write(
+            &self,
+            ctx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> core::task::Poll<Result<usize, EspError>> {
+            loop {
+                let res = self.0.borrow_mut().write(buf);
+
+                match res {
+                    Err(e) => match self.poll_wait(ctx, e) {
+                        core::task::Poll::Pending => break core::task::Poll::Pending,
+                        core::task::Poll::Ready(Err(e)) => break core::task::Poll::Ready(Err(e)),
+                        _ => (), // continue
+                    },
+                    other => break core::task::Poll::Ready(other),
+                }
+            }
+        }
+
         /// Read in the supplied buffer. Returns the number of bytes read.
         pub async fn read(&self, buf: &mut [u8]) -> Result<usize, EspError> {
             loop {
@@ -931,6 +969,14 @@ mod esptls {
         }
 
         async fn wait(&self, error: EspError) -> Result<(), EspError> {
+            core::future::poll_fn(|ctx| self.poll_wait(ctx, error)).await
+        }
+
+        fn poll_wait(
+            &self,
+            ctx: &mut std::task::Context<'_>,
+            error: EspError,
+        ) -> Poll<Result<(), EspError>> {
             const EWOULDBLOCK_I32: i32 = EWOULDBLOCK as i32;
 
             match error.code() {
@@ -938,20 +984,16 @@ mod esptls {
                 // to figure out whether we need the socket to become readable or writable
                 // The code below is therefore a hack which just waits with a timeout for the socket to (eventually)
                 // become readable as we actually don't even know if that's what esp_tls wants
-                EWOULDBLOCK_I32 => {
-                    core::future::poll_fn(|ctx| self.0.borrow().socket.poll_writable(ctx)).await?;
-                    crate::hal::delay::FreeRtos::delay_ms(0);
-                }
-                ESP_TLS_ERR_SSL_WANT_READ => {
-                    core::future::poll_fn(|ctx| self.0.borrow().socket.poll_readable(ctx)).await?
-                }
-                ESP_TLS_ERR_SSL_WANT_WRITE => {
-                    core::future::poll_fn(|ctx| self.0.borrow().socket.poll_writable(ctx)).await?
-                }
-                _ => Err(error)?,
+                EWOULDBLOCK_I32 => self
+                    .0
+                    .borrow()
+                    .socket
+                    .poll_writable(ctx)
+                    .map_ok(|_| crate::hal::delay::FreeRtos::delay_ms(0)),
+                ESP_TLS_ERR_SSL_WANT_READ => self.0.borrow().socket.poll_readable(ctx),
+                ESP_TLS_ERR_SSL_WANT_WRITE => self.0.borrow().socket.poll_writable(ctx),
+                _ => Poll::Ready(Err(error)),
             }
-
-            Ok(())
         }
 
         pub fn context_handle(&self) -> *mut sys::esp_tls {
