@@ -932,26 +932,12 @@ mod esptls {
 
         /// Read in the supplied buffer. Returns the number of bytes read.
         pub async fn read(&self, buf: &mut [u8]) -> Result<usize, EspError> {
-            loop {
-                let res = self.0.borrow_mut().read(buf);
-
-                match res {
-                    Err(e) => self.wait(e).await?,
-                    other => break other,
-                }
-            }
+            core::future::poll_fn(|ctx| self.poll_read(ctx, buf)).await
         }
 
         /// Write the supplied buffer. Returns the number of bytes written.
         pub async fn write(&self, buf: &[u8]) -> Result<usize, EspError> {
-            loop {
-                let res = self.0.borrow_mut().write(buf);
-
-                match res {
-                    Err(e) => self.wait(e).await?,
-                    other => break other,
-                }
-            }
+            core::future::poll_fn(|ctx| self.poll_write(ctx, buf)).await
         }
 
         pub async fn write_all(&self, buf: &[u8]) -> Result<(), EspError> {
